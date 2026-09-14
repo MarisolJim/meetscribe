@@ -1,0 +1,7 @@
+# Core dependencies for meetscribe.
+# Install into a virtual environment:  pip install -r requirements.txt
+
+faster-whisper==1.2.1     # local speech-to-text (Whisper via CTranslate2)
+PyAudioWPatch==0.2.12.8   # WASAPI loopback audio capture on Windows
+numpy==2.5.3              # audio buffer processing / resampling
+ollama==0.6.2             # client for the local Ollama LLM server (note generation)

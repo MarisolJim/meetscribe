@@ -1,0 +1,18 @@
+# Virtual environment
+.venv/
+venv/
+
+# Recorded meetings, transcripts, and notes stay local -- never commit them.
+recordings/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
