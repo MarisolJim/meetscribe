@@ -1,9 +1,17 @@
 """Record meeting audio to a local WAV file.
 
-We capture the system-audio *loopback* (everything coming out of your speakers,
-i.e. the other participants) using WASAPI. PyAudio delivers audio buffers to a
-callback as they arrive, so stopping simply closes the stream -- there is no
-blocking read that could wedge if the audio goes idle mid-meeting.
+Interactive meetings need BOTH sides:
+  * the system-audio *loopback* (everyone else, via WASAPI), and
+  * your *microphone* (you).
+
+PyAudio delivers audio buffers to a callback as they arrive, so stopping simply
+closes the streams -- no blocking read that could wedge when audio goes idle.
+
+The two sources can't be mixed by naive index alignment: the loopback delivers
+NO data while the system is silent, whereas the mic streams continuously. So
+each incoming buffer is timestamped against one shared clock and placed at its
+true position on a master timeline (silent gaps become silence). This keeps your
+voice and the others' voices aligned in real time.
 
 Audio is written as 16-bit PCM at 16 kHz mono, which is exactly what Whisper
 wants -- so no resampling step is needed later.
@@ -12,6 +20,7 @@ wants -- so no resampling step is needed later.
 from __future__ import annotations
 
 import threading
+import time
 import wave
 from pathlib import Path
 
@@ -24,74 +33,39 @@ TARGET_CHANNELS = 1
 CHUNK = 1024
 
 
-class LoopbackRecorder:
-    """Records system-audio loopback to a WAV file until stopped."""
+def _to_mono_16k(raw: bytes, src_rate: int, src_channels: int) -> np.ndarray:
+    """Downmix to mono and resample to 16 kHz, returning an int16 array."""
+    samples = np.frombuffer(raw, dtype=np.int16)
+    if src_channels > 1:
+        samples = samples.reshape(-1, src_channels).mean(axis=1).astype(np.int16)
 
-    def __init__(self, output_path: str | Path):
-        self.output_path = Path(output_path)
-        self.output_path.parent.mkdir(parents=True, exist_ok=True)
-        self._pa: pyaudio.PyAudio | None = None
-        self._stream = None
-        self._wav: wave.Wave_write | None = None
-        self._lock = threading.Lock()
-        self._src_rate = TARGET_RATE
-        self._src_channels = TARGET_CHANNELS
+    if src_rate != TARGET_RATE and samples.size:
+        # Simple linear resample -- fine for speech transcription.
+        n_out = int(round(samples.size * TARGET_RATE / src_rate))
+        x_old = np.linspace(0, 1, samples.size, endpoint=False)
+        x_new = np.linspace(0, 1, n_out, endpoint=False)
+        samples = np.interp(x_new, x_old, samples).astype(np.int16)
 
-    def _find_loopback_device(self, p: pyaudio.PyAudio) -> dict:
-        """Return the loopback device matching the default speakers."""
-        wasapi = p.get_host_api_info_by_type(pyaudio.paWASAPI)
-        default_speakers = p.get_device_info_by_index(wasapi["defaultOutputDevice"])
+    return samples
 
-        # Prefer the loopback whose name matches the current default output.
-        for lb in p.get_loopback_device_info_generator():
-            if default_speakers["name"] in lb["name"]:
-                return lb
-        # Fall back to the first loopback device we can find.
-        for lb in p.get_loopback_device_info_generator():
-            return lb
-        raise RuntimeError(
-            "No WASAPI loopback device found. Is an audio output device active?"
-        )
 
-    def _callback(self, in_data, frame_count, time_info, status):
-        """Called by PortAudio on its own thread with each incoming buffer."""
-        with self._lock:
-            if self._wav is not None:
-                self._wav.writeframes(self._to_target(in_data))
-        return (None, pyaudio.paContinue)
+class _DeviceCapture:
+    """Captures one input/loopback device into timestamped 16 kHz mono buffers.
 
-    def _to_target(self, raw: bytes) -> bytes:
-        """Downmix to mono and resample to 16 kHz."""
-        samples = np.frombuffer(raw, dtype=np.int16)
-        if self._src_channels > 1:
-            samples = (
-                samples.reshape(-1, self._src_channels).mean(axis=1).astype(np.int16)
-            )
+    Each buffer is tagged with the wall-clock offset (seconds since the shared
+    recording start) at which its callback fired, so it can later be placed on a
+    common timeline regardless of gaps in delivery.
+    """
 
-        if self._src_rate != TARGET_RATE and samples.size:
-            # Simple linear resample -- fine for speech transcription.
-            n_out = int(round(samples.size * TARGET_RATE / self._src_rate))
-            x_old = np.linspace(0, 1, samples.size, endpoint=False)
-            x_new = np.linspace(0, 1, n_out, endpoint=False)
-            samples = np.interp(x_new, x_old, samples).astype(np.int16)
-
-        return samples.tobytes()
-
-    def start(self) -> None:
-        if self._stream is not None:
-            raise RuntimeError("Recorder already started.")
-
-        self._pa = pyaudio.PyAudio()
-        device = self._find_loopback_device(self._pa)
+    def __init__(self, pa: pyaudio.PyAudio, device: dict, start_time: float):
+        self._device = device
+        self._start_time = start_time
         self._src_rate = int(device["defaultSampleRate"])
         self._src_channels = int(device["maxInputChannels"])
+        self._lock = threading.Lock()
+        self._buffers: list[tuple[float, np.ndarray]] = []  # (end_offset_s, samples)
 
-        self._wav = wave.open(str(self.output_path), "wb")
-        self._wav.setnchannels(TARGET_CHANNELS)
-        self._wav.setsampwidth(2)  # 16-bit
-        self._wav.setframerate(TARGET_RATE)
-
-        self._stream = self._pa.open(
+        self._stream = pa.open(
             format=pyaudio.paInt16,
             channels=self._src_channels,
             rate=self._src_rate,
@@ -100,19 +74,142 @@ class LoopbackRecorder:
             input_device_index=device["index"],
             stream_callback=self._callback,
         )
+
+    def _callback(self, in_data, frame_count, time_info, status):
+        end_offset = time.monotonic() - self._start_time
+        samples = _to_mono_16k(in_data, self._src_rate, self._src_channels)
+        with self._lock:
+            self._buffers.append((end_offset, samples))
+        return (None, pyaudio.paContinue)
+
+    def start(self) -> None:
         self._stream.start_stream()
 
-    def stop(self) -> Path:
-        """Stop recording and return the path to the finished WAV file."""
-        if self._stream is not None:
-            self._stream.stop_stream()
-            self._stream.close()
-            self._stream = None
+    def stop(self) -> None:
+        self._stream.stop_stream()
+        self._stream.close()
+
+    def to_timeline(self, total_samples: int) -> np.ndarray:
+        """Place captured buffers onto a zero-filled timeline of the given length."""
+        timeline = np.zeros(total_samples, dtype=np.int32)
         with self._lock:
-            if self._wav is not None:
-                self._wav.close()
-                self._wav = None
+            buffers = list(self._buffers)
+        for end_offset, samples in buffers:
+            n = samples.size
+            if n == 0:
+                continue
+            end_idx = int(round(end_offset * TARGET_RATE))
+            start_idx = end_idx - n
+            # Clip the buffer to the timeline bounds.
+            src_lo = max(0, -start_idx)
+            start_idx = max(0, start_idx)
+            end_idx = min(total_samples, end_idx)
+            width = end_idx - start_idx
+            if width > 0:
+                timeline[start_idx:end_idx] = samples[src_lo:src_lo + width]
+        return timeline
+
+
+class MeetingRecorder:
+    """Records mic + system-audio loopback, mixed into one WAV on stop."""
+
+    def __init__(
+        self,
+        output_path: str | Path,
+        capture_mic: bool = True,
+        mic_index: int | None = None,
+    ):
+        self.output_path = Path(output_path)
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        self.capture_mic = capture_mic
+        self.mic_index = mic_index
+        self._pa: pyaudio.PyAudio | None = None
+        self._loopback: _DeviceCapture | None = None
+        self._mic: _DeviceCapture | None = None
+        self._start_time = 0.0
+        self.mic_active = False  # set True if a mic stream was opened
+
+    def _find_loopback_device(self, p: pyaudio.PyAudio) -> dict:
+        wasapi = p.get_host_api_info_by_type(pyaudio.paWASAPI)
+        default_speakers = p.get_device_info_by_index(wasapi["defaultOutputDevice"])
+        for lb in p.get_loopback_device_info_generator():
+            if default_speakers["name"] in lb["name"]:
+                return lb
+        for lb in p.get_loopback_device_info_generator():
+            return lb
+        raise RuntimeError(
+            "No WASAPI loopback device found. Is an audio output device active?"
+        )
+
+    def _find_mic_device(self, p: pyaudio.PyAudio) -> dict | None:
+        try:
+            if self.mic_index is not None:
+                return p.get_device_info_by_index(self.mic_index)
+            return p.get_default_input_device_info()
+        except (OSError, ValueError):
+            return None
+
+    def start(self) -> None:
+        if self._pa is not None:
+            raise RuntimeError("Recorder already started.")
+
+        self._pa = pyaudio.PyAudio()
+        loop_dev = self._find_loopback_device(self._pa)
+
+        mic_dev = self._find_mic_device(self._pa) if self.capture_mic else None
+        # A loopback device also shows up as an input; don't use it as the mic.
+        if mic_dev is not None and mic_dev.get("isLoopbackDevice"):
+            mic_dev = None
+
+        # Single shared clock for both streams.
+        self._start_time = time.monotonic()
+        self._loopback = _DeviceCapture(self._pa, loop_dev, self._start_time)
+
+        if mic_dev is not None:
+            try:
+                self._mic = _DeviceCapture(self._pa, mic_dev, self._start_time)
+                self.mic_active = True
+            except OSError:
+                self._mic = None  # mic busy/unavailable -> loopback only
+
+        self._loopback.start()
+        if self._mic is not None:
+            self._mic.start()
+
+    def stop(self) -> Path:
+        """Stop both streams, mix the timelines, and write the WAV file."""
+        elapsed = time.monotonic() - self._start_time
+        if self._loopback is not None:
+            self._loopback.stop()
+        if self._mic is not None:
+            self._mic.stop()
         if self._pa is not None:
             self._pa.terminate()
-            self._pa = None
+
+        total_samples = max(1, int(round(elapsed * TARGET_RATE)))
+        mix = np.zeros(total_samples, dtype=np.int32)
+        if self._loopback is not None:
+            mix += self._loopback.to_timeline(total_samples)
+        if self._mic is not None:
+            mix += self._mic.to_timeline(total_samples)
+
+        # Sum can exceed int16 range when both talk at once; clip to be safe.
+        mix = np.clip(mix, -32768, 32767).astype(np.int16)
+
+        with wave.open(str(self.output_path), "wb") as wav:
+            wav.setnchannels(TARGET_CHANNELS)
+            wav.setsampwidth(2)  # 16-bit
+            wav.setframerate(TARGET_RATE)
+            wav.writeframes(mix.tobytes())
+
+        self._pa = None
+        self._loopback = None
+        self._mic = None
         return self.output_path
+
+
+class LoopbackRecorder(MeetingRecorder):
+    """System-audio only (no microphone). Kept for probes/tests."""
+
+    def __init__(self, output_path: str | Path):
+        super().__init__(output_path, capture_mic=False)

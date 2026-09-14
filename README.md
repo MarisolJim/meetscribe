@@ -4,7 +4,7 @@ Record your online meetings, transcribe them locally, and automatically generate
 notes when the meeting ends — all running **100% on your machine** with
 open-source models. Nothing is uploaded anywhere.
 
-- 🎙️ **Capture** system audio (everyone in the meeting) via Windows WASAPI loopback
+- 🎙️ **Capture** both sides of an interactive meeting — everyone else via Windows WASAPI loopback **and your own microphone** — mixed on a shared timeline
 - 📝 **Transcribe** locally with [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (an OpenAI Whisper model from Hugging Face)
 - 🧠 **Summarize** into structured notes with a local LLM via [Ollama](https://ollama.com)
 - 💾 **Store** each meeting in its own folder on your disk
@@ -12,9 +12,15 @@ open-source models. Nothing is uploaded anywhere.
 ## How it works
 
 ```
-meeting audio ─▶ record (loopback) ─▶ transcribe (Whisper) ─▶ notes (local LLM)
-                     audio.wav            transcript.txt          notes.md
+ you (mic) ─┐
+            ├─▶ mix on shared timeline ─▶ transcribe (Whisper) ─▶ notes (local LLM)
+others (loopback) ─┘        audio.wav          transcript.txt          notes.md
 ```
+
+Because the loopback delivers no data while the system is silent (but your mic
+streams continuously), each incoming audio buffer is timestamped against one
+shared clock and placed at its true position on a master timeline. That keeps
+your voice and the others' voices aligned in real time.
 
 ## Requirements
 
@@ -58,8 +64,17 @@ Output lands in `recordings/<date>_<title>/`:
 | `--title` | `meeting` | Meeting title (used in the folder name and notes) |
 | `--model` | `small` | Whisper size: `tiny` / `base` / `small` / `medium` / `large-v3` |
 | `--llm` | `llama3.2:3b` | Ollama model used for notes (try `llama3.1:8b` for better quality) |
+| `--no-mic` | off | Capture system audio only (don't record your microphone) |
+| `--mic-index` | auto | Specific input-device index to use as the mic (see below) |
 | `--no-notes` | off | Transcribe only, skip note generation |
 | `--output` | `recordings` | Base directory for saved meetings |
+
+Your default microphone is used automatically. To list devices and their
+indices (e.g. if you have several mics):
+
+```bash
+python scripts/list_audio_devices.py
+```
 
 ## Notes on models
 

@@ -16,20 +16,27 @@ import time
 
 from .notes import DEFAULT_MODEL as DEFAULT_LLM
 from .notes import generate_notes
-from .recorder import LoopbackRecorder
+from .recorder import MeetingRecorder
 from .storage import MeetingStore
 from .transcriber import transcribe
 
 
 def _record(args: argparse.Namespace) -> int:
     store = MeetingStore(base_dir=args.output, title=args.title)
-    recorder = LoopbackRecorder(store.audio_path)
+    recorder = MeetingRecorder(
+        store.audio_path,
+        capture_mic=not args.no_mic,
+        mic_index=args.mic_index,
+    )
 
     print(f"\n  Meeting: {args.title}")
     print(f"  Saving to: {store.dir}")
     recorder.start()
     started = time.time()
-    print("\n  ● Recording your meeting's audio.  Press Enter to stop.\n")
+    sources = "system audio + your mic" if recorder.mic_active else "system audio only"
+    if not args.no_mic and not recorder.mic_active:
+        sources += "  (no microphone found)"
+    print(f"\n  ● Recording {sources}.  Press Enter to stop.\n")
     try:
         input()
     except (KeyboardInterrupt, EOFError):
@@ -60,6 +67,7 @@ def _record(args: argparse.Namespace) -> int:
             "duration_seconds": round(duration),
             "whisper_model": args.model,
             "llm_model": notes_model,
+            "microphone_captured": recorder.mic_active,
         }
     )
     print(f"\n  ✓ Done. Open: {store.notes_path}\n")
@@ -75,6 +83,8 @@ def main(argv: list[str] | None = None) -> int:
     rec.add_argument("--output", default="recordings", help="base directory for meetings")
     rec.add_argument("--model", default="small", help="Whisper size: tiny/base/small/medium/large-v3")
     rec.add_argument("--llm", default=DEFAULT_LLM, help="Ollama model for notes")
+    rec.add_argument("--no-mic", action="store_true", help="capture system audio only (don't record your microphone)")
+    rec.add_argument("--mic-index", type=int, default=None, help="specific input-device index to use as the mic")
     rec.add_argument("--no-notes", action="store_true", help="transcribe only, skip note generation")
     rec.set_defaults(func=_record)
 

@@ -34,6 +34,21 @@ def main() -> None:
         if not found:
             print("  (none found)")
 
+        print("-" * 60)
+        try:
+            default_mic = p.get_default_input_device_info()
+            default_mic_index = default_mic["index"]
+        except OSError:
+            default_mic_index = None
+
+        print("Microphones / input devices (pass the index as --mic-index):")
+        for i in range(p.get_device_count()):
+            info = p.get_device_info_by_index(i)
+            if info["maxInputChannels"] < 1 or info.get("isLoopbackDevice"):
+                continue
+            marker = "  <- default" if i == default_mic_index else ""
+            print(f"  [{i:>3}] {info['name']}{marker}")
+
 
 if __name__ == "__main__":
     main()
