@@ -48,6 +48,31 @@ transcribes and writes notes automatically.
 python -m meetscribe record --title "Weekly Sync"
 ```
 
+### Shortcut (recommended)
+
+`meet.sh` activates the virtual environment for you, so you can run the tool
+from anywhere without `cd`-ing in or activating the venv by hand. Add this line
+to your `~/.bashrc` (Git Bash) once:
+
+```bash
+alias meet="$HOME/Documents/meetscribe/meet.sh"
+```
+
+Then simply:
+
+```bash
+meet record --title "Weekly Sync"
+meet process "recordings/2026-09-15_1001_my-meeting" --notes-only
+```
+
+To regenerate notes for **every** recorded meeting (e.g. after changing the
+model or prompt), without re-transcribing:
+
+```bash
+./scripts/redo_all_notes.sh              # default model
+./scripts/redo_all_notes.sh llama3.1:8b  # a specific model
+```
+
 Output lands in `recordings/<date>_<title>/`:
 
 | File | Contents |
