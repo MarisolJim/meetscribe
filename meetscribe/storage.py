@@ -37,6 +37,22 @@ class MeetingStore:
             "started_at": started.isoformat(timespec="seconds"),
         }
 
+    @classmethod
+    def from_dir(cls, meeting_dir: str | Path) -> "MeetingStore":
+        """Bind to an existing meeting folder (e.g. to re-process its audio)."""
+        self = cls.__new__(cls)
+        self.dir = Path(meeting_dir)
+        if not self.dir.is_dir():
+            raise FileNotFoundError(f"No such meeting folder: {self.dir}")
+        meta_path = self.dir / "meeting.json"
+        self.meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
+        self.title = self.meta.get("title") or self.dir.name
+        self.meta.setdefault("title", self.title)
+        self.meta.setdefault(
+            "started_at", datetime.now().isoformat(timespec="seconds")
+        )
+        return self
+
     @property
     def audio_path(self) -> Path:
         return self.dir / "audio.wav"

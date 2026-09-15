@@ -11,6 +11,13 @@ On a CPU, "small" is a good default; "medium" is more accurate but slower.
 
 from __future__ import annotations
 
+import os
+
+# The "xet" transfer backend can fail on flaky networks (connection resets while
+# fetching xet-read-token). Fall back to plain HTTPS, which retries more reliably.
+# Must be set before huggingface_hub is imported.
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+
 from dataclasses import dataclass
 from pathlib import Path
 
