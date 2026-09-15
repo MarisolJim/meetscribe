@@ -28,7 +28,7 @@ your voice and the others' voices aligned in real time.
 - Python 3.12+ (developed on 3.14)
 - [Ollama](https://ollama.com) installed and running, with a model pulled:
   ```bash
-  ollama pull llama3.2:3b
+  ollama pull llama3.1:8b   # default; or llama3.2:3b for a smaller/faster option
   ```
 
 ## Setup
@@ -88,7 +88,7 @@ Output lands in `recordings/<date>_<title>/`:
 |------|---------|-------------|
 | `--title` | `meeting` | Meeting title (used in the folder name and notes) |
 | `--model` | `small` | Whisper size: `tiny` / `base` / `small` / `medium` / `large-v3` |
-| `--llm` | `llama3.2:3b` | Ollama model used for notes (try `llama3.1:8b` for better quality) |
+| `--llm` | `llama3.1:8b` | Ollama model used for notes (use `llama3.2:3b` for faster, lower-quality notes) |
 | `--no-mic` | off | Capture system audio only (don't record your microphone) |
 | `--mic-index` | auto | Specific input-device index to use as the mic (see below) |
 | `--no-notes` | off | Transcribe only, skip note generation |

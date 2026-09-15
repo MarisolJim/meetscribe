@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import ollama
 
-DEFAULT_MODEL = "llama3.2:3b"
+DEFAULT_MODEL = "llama3.1:8b"
 
 # Transcript characters per chunk (~4 chars/token, so ~2000 tokens/chunk).
 _CHUNK_CHARS = 8000
@@ -84,6 +84,7 @@ def _chat(model: str, system: str, user: str, num_ctx: int) -> str:
             "temperature": 0.2,  # low temp -> factual, less embellishment
             "num_ctx": num_ctx,  # actually read the whole chunk (no silent truncation)
             "num_predict": _NUM_PREDICT,
+            "repeat_penalty": 1.15,  # guard against runaway repetition loops
         },
     )
     return response["message"]["content"].strip()
