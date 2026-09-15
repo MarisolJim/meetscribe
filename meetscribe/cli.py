@@ -113,6 +113,14 @@ def _process(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Windows consoles/redirected output can default to cp1252, which can't
+    # encode the status glyphs (or accented transcript text). Force UTF-8.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError):
+            pass
+
     parser = argparse.ArgumentParser(prog="meetscribe", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
 
