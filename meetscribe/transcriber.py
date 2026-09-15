@@ -7,6 +7,10 @@ Model sizes trade accuracy for speed:
     tiny  base  small  medium  large-v3
     fast  <-------------------->  accurate
 On a CPU, "small" is a good default; "medium" is more accurate but slower.
+
+Robustness: if the requested model isn't cached and can't be downloaded (e.g. a
+network drop), transcription falls back to the best already-cached model instead
+of failing, so the pipeline always completes when *any* model is available.
 """
 
 from __future__ import annotations
@@ -22,6 +26,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from faster_whisper import WhisperModel
+from huggingface_hub import constants as hf_constants
+
+# Whisper model sizes in ascending order of quality (and cost).
+QUALITY_ORDER = ["tiny", "base", "small", "medium", "large-v1", "large-v2", "large-v3"]
+_REQUIRED_FILES = {"config.json", "model.bin", "tokenizer.json", "vocabulary.txt"}
 
 
 @dataclass
@@ -35,6 +44,7 @@ class TranscriptSegment:
 class Transcript:
     language: str
     segments: list[TranscriptSegment]
+    model_used: str = ""  # the model that actually ran (may differ if we fell back)
 
     @property
     def text(self) -> str:
@@ -54,6 +64,58 @@ def _fmt(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
+def is_model_cached(size: str) -> bool:
+    """True if every required file for this model size is already on disk."""
+    repo_dir = Path(hf_constants.HF_HUB_CACHE) / f"models--Systran--faster-whisper-{size}"
+    snapshots = repo_dir / "snapshots"
+    if not snapshots.is_dir():
+        return False
+    for snap in snapshots.iterdir():
+        if snap.is_dir() and _REQUIRED_FILES <= {p.name for p in snap.iterdir()}:
+            return True
+    return False
+
+
+def cached_models() -> list[str]:
+    """Known model sizes that are fully cached, ascending by quality."""
+    return [s for s in QUALITY_ORDER if is_model_cached(s)]
+
+
+def _pick_fallback(requested: str, cached: list[str]) -> str | None:
+    """Choose the cached model closest to the requested quality (prefer faster on ties)."""
+    if not cached:
+        return None
+    req_rank = QUALITY_ORDER.index(requested) if requested in QUALITY_ORDER else len(QUALITY_ORDER)
+    return min(cached, key=lambda s: (abs(QUALITY_ORDER.index(s) - req_rank), QUALITY_ORDER.index(s)))
+
+
+def _load_model(model_size: str, device: str, compute_type: str) -> tuple[WhisperModel, str]:
+    """Load the requested model, or fall back to a cached one. Returns (model, size_used)."""
+    kwargs = {"device": device, "compute_type": compute_type}
+
+    # 1. Already cached -> load offline (fast, no network at all).
+    if is_model_cached(model_size):
+        return WhisperModel(model_size, local_files_only=True, **kwargs), model_size
+
+    # 2. Not cached -> try to download it.
+    try:
+        return WhisperModel(model_size, **kwargs), model_size
+    except Exception as exc:
+        # 3. Download failed -> fall back to the best cached model, if any.
+        fallback = _pick_fallback(model_size, cached_models())
+        if fallback is None:
+            raise RuntimeError(
+                f"Could not load Whisper model '{model_size}' and no model is cached "
+                f"locally to fall back to. Connect to the internet once to download a "
+                f"model (e.g. `--model base`). Original error: {exc}"
+            ) from exc
+        print(
+            f"  ! Could not load '{model_size}' (no network?). "
+            f"Falling back to cached '{fallback}'."
+        )
+        return WhisperModel(fallback, local_files_only=True, **kwargs), fallback
+
+
 def transcribe(
     wav_path: str | Path,
     model_size: str = "small",
@@ -64,8 +126,9 @@ def transcribe(
     """Transcribe a WAV file and return a Transcript.
 
     compute_type="int8" keeps memory/CPU usage low while staying accurate.
+    Falls back to a cached model if the requested one is unavailable.
     """
-    model = WhisperModel(model_size, device=device, compute_type=compute_type)
+    model, model_used = _load_model(model_size, device, compute_type)
     segments_iter, info = model.transcribe(
         str(wav_path),
         language=language,
@@ -75,4 +138,4 @@ def transcribe(
         TranscriptSegment(start=s.start, end=s.end, text=s.text)
         for s in segments_iter
     ]
-    return Transcript(language=info.language, segments=segments)
+    return Transcript(language=info.language, segments=segments, model_used=model_used)

@@ -15,6 +15,7 @@ the recording is still saved -- re-run it later with `process <folder>`.
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 import time
 
@@ -28,25 +29,51 @@ from .transcriber import transcribe
 def _transcribe_and_note(
     store: MeetingStore, args: argparse.Namespace, extra_meta: dict
 ) -> None:
-    """Transcribe the store's audio, generate notes, and finalize metadata."""
+    """Transcribe the store's audio, generate notes, and finalize metadata.
+
+    Transcription failure is fatal (nothing to save), but the recording is kept
+    by the caller. A notes failure is NOT fatal: the transcript is preserved and
+    metadata is still written, so the run always leaves usable output behind.
+    """
     print(f"  → Transcribing with Whisper ({args.model})...")
     transcript = transcribe(store.audio_path, model_size=args.model)
     store.save_transcript(transcript.to_timestamped_text(), transcript.language)
     print(f"    transcript.txt saved ({len(transcript.segments)} segments)")
 
+    notes_model: str | None = None
+    notes_ok = False
     if args.no_notes:
         print("  → Skipping notes (--no-notes).")
-        notes_model = None
     else:
         print(f"  → Generating notes with {args.llm}...")
-        notes = generate_notes(transcript.text, model=args.llm)
-        store.save_notes(notes, store.title)
-        notes_model = args.llm
-        print("    notes.md saved")
+        try:
+            notes = generate_notes(transcript.text, model=args.llm)
+            store.save_notes(notes, store.title)
+            notes_model = args.llm
+            notes_ok = True
+            print("    notes.md saved")
+        except Exception as exc:
+            # Don't lose the transcript over a notes failure (e.g. Ollama down).
+            print(f"    ! Note generation failed: {exc}")
+            print("      Is Ollama running? Your transcript is saved; regenerate notes with:")
+            print(f'        python -m meetscribe process "{store.dir}"')
+            store.save_notes(
+                f"_Note generation failed ({exc}). The transcript is in "
+                f"transcript.txt; re-run `process` on this folder to try again._",
+                store.title,
+            )
 
-    meta = {"whisper_model": args.model, "llm_model": notes_model}
+    meta = {
+        "whisper_model": transcript.model_used or args.model,
+        "whisper_model_requested": args.model,
+        "llm_model": notes_model,
+        "notes_generated": notes_ok,
+    }
     meta.update(extra_meta)
     store.finalize(meta)
+
+    if transcript.model_used and transcript.model_used != args.model:
+        print(f"  (note: used cached '{transcript.model_used}' model instead of '{args.model}')")
     print(f"\n  ✓ Done. Open: {store.notes_path}\n")
 
 
@@ -92,20 +119,44 @@ def _record(args: argparse.Namespace) -> int:
     return 0
 
 
+def _regenerate_notes(store: MeetingStore, args: argparse.Namespace) -> None:
+    """Regenerate notes from the existing transcript, without re-transcribing."""
+    raw = store.transcript_path.read_text(encoding="utf-8")
+    # transcript.txt is timestamped ("[00:00:01 -> 00:00:05] text"); strip the
+    # timestamps to feed the model cleaner prose.
+    plain = "\n".join(
+        re.sub(r"^\[[^\]]*\]\s*", "", line) for line in raw.splitlines()
+    ).strip()
+    print(f"  → Regenerating notes with {args.llm}...")
+    notes = generate_notes(plain, model=args.llm)
+    store.save_notes(notes, store.title)
+    store.finalize({"llm_model": args.llm, "notes_generated": True})
+    print(f"    notes.md saved\n\n  ✓ Done. Open: {store.notes_path}\n")
+
+
 def _process(args: argparse.Namespace) -> int:
     try:
         store = MeetingStore.from_dir(args.folder)
     except FileNotFoundError as exc:
         print(f"  {exc}")
         return 1
-    if not store.audio_path.exists():
-        print(f"  No audio.wav found in {store.dir}")
-        return 1
 
     print(f"\n  Meeting: {store.title}")
     print(f"  Folder: {store.dir}\n")
+
+    notes_only = getattr(args, "notes_only", False)
+    if notes_only and not store.transcript_path.exists():
+        print("  --notes-only needs an existing transcript.txt (none found).")
+        return 1
+    if not notes_only and not store.audio_path.exists():
+        print(f"  No audio.wav found in {store.dir}")
+        return 1
+
     try:
-        _transcribe_and_note(store, args, {})
+        if notes_only:
+            _regenerate_notes(store, args)
+        else:
+            _transcribe_and_note(store, args, {})
     except Exception as exc:
         print(f"\n  ✗ Processing failed: {exc}")
         return 1
@@ -142,6 +193,7 @@ def main(argv: list[str] | None = None) -> int:
     proc.add_argument("--model", default="small", help="Whisper size: tiny/base/small/medium/large-v3")
     proc.add_argument("--llm", default=DEFAULT_LLM, help="Ollama model for notes")
     proc.add_argument("--no-notes", action="store_true", help="transcribe only, skip note generation")
+    proc.add_argument("--notes-only", action="store_true", help="regenerate notes from the existing transcript (no re-transcribing)")
     proc.set_defaults(func=_process)
 
     args = parser.parse_args(argv)
