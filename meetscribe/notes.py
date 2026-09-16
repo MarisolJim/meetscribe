@@ -50,7 +50,12 @@ mentioned. Group by person. Write "No owners identified." if nobody was named.
 "None recorded." if there were none.
 
 Be specific and use concrete details from the content. Do not invent names, \
-dates, numbers, or tasks that are not supported by the material."""
+dates, numbers, or tasks that are not supported by the material.
+
+If lines are prefixed with a speaker ("You:" is the person keeping these notes; \
+"Others:" is everyone else in the meeting), use that to attribute tasks and \
+commitments correctly in "Who Does What" -- distinguish what *you* committed to \
+from what others own."""
 
 _MAP_SYSTEM = """You are summarizing ONE PART of a longer meeting/lecture \
 transcript. Capture, in detail and using only this excerpt:

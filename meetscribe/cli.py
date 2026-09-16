@@ -23,7 +23,13 @@ from .notes import DEFAULT_MODEL as DEFAULT_LLM
 from .notes import generate_notes
 from .recorder import MeetingRecorder
 from .storage import MeetingStore
-from .transcriber import transcribe
+from .transcriber import (
+    dedupe_echo,
+    labeled_plain_text,
+    labeled_timestamped_text,
+    merge_labeled,
+    transcribe,
+)
 
 
 def _transcribe_and_note(
@@ -35,10 +41,29 @@ def _transcribe_and_note(
     by the caller. A notes failure is NOT fatal: the transcript is preserved and
     metadata is still written, so the run always leaves usable output behind.
     """
-    print(f"  → Transcribing with Whisper ({args.model})...")
-    transcript = transcribe(store.audio_path, model_size=args.model)
-    store.save_transcript(transcript.to_timestamped_text(), transcript.language)
-    print(f"    transcript.txt saved ({len(transcript.segments)} segments)")
+    # When separate speaker tracks exist (a mic was captured), transcribe each
+    # and label the merged transcript "You" vs "Others". Otherwise fall back to
+    # the single mixed track (older recordings, or --no-mic runs).
+    labeled = store.you_path.exists() and store.others_path.exists()
+    if labeled:
+        print(f"  → Transcribing 2 tracks (You + Others) with Whisper ({args.model})...")
+        you_t = transcribe(store.you_path, model_size=args.model)
+        others_t = transcribe(store.others_path, model_size=args.model)
+        model_used = you_t.model_used or others_t.model_used or args.model
+        segments = dedupe_echo(merge_labeled([("You", you_t), ("Others", others_t)]))
+        store.save_transcript(
+            labeled_timestamped_text(segments), you_t.language or others_t.language
+        )
+        notes_input = labeled_plain_text(segments)
+        n_segments = len(segments)
+    else:
+        print(f"  → Transcribing with Whisper ({args.model})...")
+        transcript = transcribe(store.audio_path, model_size=args.model)
+        model_used = transcript.model_used
+        store.save_transcript(transcript.to_timestamped_text(), transcript.language)
+        notes_input = transcript.text
+        n_segments = len(transcript.segments)
+    print(f"    transcript.txt saved ({n_segments} segments)")
 
     notes_model: str | None = None
     notes_ok = False
@@ -47,7 +72,7 @@ def _transcribe_and_note(
     else:
         print(f"  → Generating notes with {args.llm}...")
         try:
-            notes = generate_notes(transcript.text, model=args.llm)
+            notes = generate_notes(notes_input, model=args.llm)
             store.save_notes(notes, store.title)
             notes_model = args.llm
             notes_ok = True
@@ -64,16 +89,17 @@ def _transcribe_and_note(
             )
 
     meta = {
-        "whisper_model": transcript.model_used or args.model,
+        "whisper_model": model_used or args.model,
         "whisper_model_requested": args.model,
         "llm_model": notes_model,
         "notes_generated": notes_ok,
+        "speaker_labeled": labeled,
     }
     meta.update(extra_meta)
     store.finalize(meta)
 
-    if transcript.model_used and transcript.model_used != args.model:
-        print(f"  (note: used cached '{transcript.model_used}' model instead of '{args.model}')")
+    if model_used and model_used != args.model:
+        print(f"  (note: used cached '{model_used}' model instead of '{args.model}')")
     print(f"\n  ✓ Done. Open: {store.notes_path}\n")
 
 
@@ -92,7 +118,10 @@ def _record(args: argparse.Namespace) -> int:
     sources = "system audio + your mic" if recorder.mic_active else "system audio only"
     if not args.no_mic and not recorder.mic_active:
         sources += "  (no microphone found)"
-    print(f"\n  ● Recording {sources}.  Press Enter to stop.\n")
+    print(f"\n  ● Recording {sources}.  Press Enter to stop.")
+    if recorder.mic_active:
+        print("    (tip: use headphones so 'You' and 'Others' stay cleanly separated)")
+    print()
     try:
         input()
     except (KeyboardInterrupt, EOFError):

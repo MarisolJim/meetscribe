@@ -33,6 +33,15 @@ TARGET_CHANNELS = 1
 CHUNK = 1024
 
 
+def _write_wav(path, samples: np.ndarray) -> None:
+    """Write a mono 16-bit 16 kHz WAV from an int16 sample array."""
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(TARGET_CHANNELS)
+        wav.setsampwidth(2)  # 16-bit
+        wav.setframerate(TARGET_RATE)
+        wav.writeframes(samples.tobytes())
+
+
 def _to_mono_16k(raw: bytes, src_rate: int, src_channels: int) -> np.ndarray:
     """Downmix to mono and resample to 16 kHz, returning an int16 array."""
     samples = np.frombuffer(raw, dtype=np.int16)
@@ -128,6 +137,10 @@ class MeetingRecorder:
         self._mic: _DeviceCapture | None = None
         self._start_time = 0.0
         self.mic_active = False  # set True if a mic stream was opened
+        # Per-speaker tracks written alongside the mix, for "You vs Others"
+        # labeling. Set to a real path in stop() when that track has audio.
+        self.you_path: Path | None = None
+        self.others_path: Path | None = None
 
     def _find_loopback_device(self, p: pyaudio.PyAudio) -> dict:
         wasapi = p.get_host_api_info_by_type(pyaudio.paWASAPI)
@@ -177,7 +190,12 @@ class MeetingRecorder:
             self._mic.start()
 
     def stop(self) -> Path:
-        """Stop both streams, mix the timelines, and write the WAV file."""
+        """Stop both streams, write the mix, and write per-speaker tracks.
+
+        Writes ``audio.wav`` (the mix, for playback) plus ``others.wav`` (system
+        loopback) and, when a mic was captured, ``you.wav`` -- the separate
+        tracks used later to label the transcript as "You" vs "Others".
+        """
         elapsed = time.monotonic() - self._start_time
         if self._loopback is not None:
             self._loopback.stop()
@@ -187,20 +205,31 @@ class MeetingRecorder:
             self._pa.terminate()
 
         total_samples = max(1, int(round(elapsed * TARGET_RATE)))
-        mix = np.zeros(total_samples, dtype=np.int32)
-        if self._loopback is not None:
-            mix += self._loopback.to_timeline(total_samples)
-        if self._mic is not None:
-            mix += self._mic.to_timeline(total_samples)
+        others = (
+            self._loopback.to_timeline(total_samples)
+            if self._loopback is not None
+            else np.zeros(total_samples, dtype=np.int32)
+        )
+        you = (
+            self._mic.to_timeline(total_samples)
+            if self._mic is not None
+            else None
+        )
 
-        # Sum can exceed int16 range when both talk at once; clip to be safe.
-        mix = np.clip(mix, -32768, 32767).astype(np.int16)
+        # Mix (clip: both talking at once can exceed int16 range).
+        mix = others.copy()
+        if you is not None:
+            mix += you
+        _write_wav(self.output_path, np.clip(mix, -32768, 32767).astype(np.int16))
 
-        with wave.open(str(self.output_path), "wb") as wav:
-            wav.setnchannels(TARGET_CHANNELS)
-            wav.setsampwidth(2)  # 16-bit
-            wav.setframerate(TARGET_RATE)
-            wav.writeframes(mix.tobytes())
+        # Per-speaker tracks for labeling.
+        others_path = self.output_path.parent / "others.wav"
+        _write_wav(others_path, np.clip(others, -32768, 32767).astype(np.int16))
+        self.others_path = others_path
+        if you is not None:
+            you_path = self.output_path.parent / "you.wav"
+            _write_wav(you_path, np.clip(you, -32768, 32767).astype(np.int16))
+            self.you_path = you_path
 
         self._pa = None
         self._loopback = None

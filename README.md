@@ -5,6 +5,7 @@ notes when the meeting ends — all running **100% on your machine** with
 open-source models. Nothing is uploaded anywhere.
 
 - 🎙️ **Capture** both sides of an interactive meeting — everyone else via Windows WASAPI loopback **and your own microphone** — mixed on a shared timeline
+- 🗣️ **Label speakers** as **You** vs **Others** (the mic and loopback are transcribed separately), with automatic echo removal so speaker bleed doesn't create duplicates
 - 📝 **Transcribe** locally with [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (an OpenAI Whisper model from Hugging Face)
 - 🧠 **Summarize** into structured notes with a local LLM via [Ollama](https://ollama.com)
 - 💾 **Store** each meeting in its own folder on your disk
@@ -77,10 +78,17 @@ Output lands in `recordings/<date>_<title>/`:
 
 | File | Contents |
 |------|----------|
-| `audio.wav` | the raw recording |
-| `transcript.txt` | timestamped transcript |
+| `audio.wav` | the mixed recording (for playback) |
+| `you.wav` / `others.wav` | separate mic and system tracks (used for speaker labeling) |
+| `transcript.txt` | timestamped transcript, labeled `You:` / `Others:` |
 | `notes.md` | generated summary, key points, decisions, action items |
 | `meeting.json` | metadata |
+
+Speaker labeling happens automatically whenever a microphone is captured. Use
+**headphones** for the cleanest separation — otherwise your mic also hears the
+other participants through your speakers (that echo is auto-removed, but
+headphones avoid it entirely). Older recordings without the split tracks, and
+`--no-mic` runs, fall back to a single unlabeled transcript.
 
 ### Options
 

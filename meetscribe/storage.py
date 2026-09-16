@@ -58,6 +58,14 @@ class MeetingStore:
         return self.dir / "audio.wav"
 
     @property
+    def you_path(self) -> Path:
+        return self.dir / "you.wav"
+
+    @property
+    def others_path(self) -> Path:
+        return self.dir / "others.wav"
+
+    @property
     def transcript_path(self) -> Path:
         return self.dir / "transcript.txt"
 

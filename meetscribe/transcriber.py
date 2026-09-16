@@ -16,6 +16,7 @@ of failing, so the pipeline always completes when *any* model is available.
 from __future__ import annotations
 
 import os
+import re
 
 # The "xet" transfer backend can fail on flaky networks (connection resets while
 # fetching xet-read-token). Fall back to plain HTTPS, which retries more reliably.
@@ -62,6 +63,67 @@ def _fmt(seconds: float) -> str:
     m, s = divmod(int(seconds), 60)
     h, m = divmod(m, 60)
     return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+@dataclass
+class LabeledSegment:
+    start: float
+    end: float
+    speaker: str
+    text: str
+
+
+def merge_labeled(parts: list[tuple[str, Transcript]]) -> list[LabeledSegment]:
+    """Interleave segments from several labeled transcripts, ordered by time."""
+    merged: list[LabeledSegment] = []
+    for speaker, transcript in parts:
+        for s in transcript.segments:
+            if s.text.strip():
+                merged.append(LabeledSegment(s.start, s.end, speaker, s.text.strip()))
+    merged.sort(key=lambda seg: seg.start)
+    return merged
+
+
+def _tokens(text: str) -> set[str]:
+    return set(re.sub(r"[^a-z0-9 ]+", " ", text.lower()).split())
+
+
+def dedupe_echo(segments: list[LabeledSegment], tol: float = 2.0) -> list[LabeledSegment]:
+    """Drop "You" segments that echo an "Others" segment at the same time.
+
+    Without headphones, the mic picks up the other participants coming out of the
+    speakers, so their words appear on both tracks. The loopback ("Others") is the
+    authoritative copy, so we remove the mic's echoed duplicate. Real "You" speech
+    doesn't match any "Others" line, so it is kept.
+    """
+    others = [s for s in segments if s.speaker == "Others"]
+    kept: list[LabeledSegment] = []
+    for s in segments:
+        if s.speaker == "You":
+            toks = _tokens(s.text)
+            if toks:
+                is_echo = False
+                for o in others:
+                    # overlapping (with tolerance) and highly similar text
+                    if s.start <= o.end + tol and o.start <= s.end + tol:
+                        ot = _tokens(o.text)
+                        if ot and len(toks & ot) / max(len(toks), len(ot)) >= 0.8:
+                            is_echo = True
+                            break
+                if is_echo:
+                    continue
+        kept.append(s)
+    return kept
+
+
+def labeled_timestamped_text(segments: list[LabeledSegment]) -> str:
+    """e.g. "[00:01:23] Others: ...". Saved as the transcript."""
+    return "\n".join(f"[{_fmt(s.start)}] {s.speaker}: {s.text}" for s in segments)
+
+
+def labeled_plain_text(segments: list[LabeledSegment]) -> str:
+    """e.g. "Others: ...". Fed to the notes model so it can attribute speakers."""
+    return "\n".join(f"{s.speaker}: {s.text}" for s in segments)
 
 
 def is_model_cached(size: str) -> bool:
